@@ -1,0 +1,6 @@
+,all_genes,top20_genes
+accuracy,0.856,0.844
+precision,0.865,0.878
+recall,0.882,0.843
+f1,0.874,0.86
+auc,0.92,0.892
