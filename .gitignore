@@ -1,26 +1,8 @@
-# Python
 __pycache__/
-*.py[cod]
-.Python
-.venv/
-venv/
-env/
-
-# Notebook checkpoints
 .ipynb_checkpoints/
-
-# Downloaded GEO data and generated analysis outputs
 geo_cache/
-results_*/
 *.zip
-
-# Large local reference files
 *.xls
 *.xlsx
-
-# OS/editor
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
+*.gz
 
