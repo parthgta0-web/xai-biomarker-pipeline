@@ -1,6 +1,6 @@
 # XAI biomarker pipeline: replication attempt of three DTU papers
 
-[![Python syntax check](https://github.com/parthgta0-web/xai-biomarker-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/parthgta0-web/xai-biomarker-pipeline/actions/workflows/ci.yml)
+[![Python syntax check](https://github.com/parthgta0-web/xai-biomarker-pipeline/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/parthgta0-web/xai-biomarker-pipeline/actions/workflows/ci.yml?query=branch%3Amain)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 An exploratory student replication attempt using XGBoost and SHAP on public GEO microarray data. The pipeline uses XGBoost and SHAP, with leakage-aware evaluation and differential-expression analysis.
