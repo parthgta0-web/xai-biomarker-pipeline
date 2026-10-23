@@ -28,7 +28,10 @@ Always run with --inspect first and check the class counts it prints against
 the paper (oscc: 38 vs 58, t2d: 70 vs 107, bc: 252 vs 194). Adjust --pos/--neg/--drop if needed.
 """
 import argparse
+import gzip
 import re
+import urllib.error
+import urllib.request
 import warnings
 from pathlib import Path
 
@@ -68,13 +71,19 @@ PRESETS = {
                 },
                 pos=[], neg=[], drop=[], expected="2 datasets: 25 T2D vs 60 control (paper total with GSE18732: 70 vs 107)"),
     "bc": dict(gse=["GSE27562", "GSE47862"],
-               pos=["malignant", "benign", "breast cancer"],
-               neg=["normal", "healthy", "control"],
-               drop=["ectopic"], expected="252 breast cancer(+benign) vs 194 normal"),
+               per_gse={
+                   "GSE27562": dict(label_col="phenotype", pos=["malignant", "benign", "pre-surgery"],
+                                      neg=["normal"], drop=["ectopic", "post-surgery"]),
+                   "GSE47862": dict(label_col="developed_breast_cancer", pos=["yes"], neg=["no"], drop=[]),
+               },
+               pos=[], neg=[], drop=[], expected="252 breast cancer(+benign) vs 194 normal"),
 }
 
 GRID = dict(n_estimators=[50, 100, 200], max_depth=[3, 5], learning_rate=[0.05, 0.1, 0.2],
             subsample=[0.8], colsample_bytree=[0.8])
+FAST_PARAMS = dict(n_estimators=100, max_depth=3, learning_rate=0.1,
+                   subsample=0.8, colsample_bytree=0.8)
+GENE_INFO_URL = "https://ftp.ncbi.nlm.nih.gov/gene/DATA/GENE_INFO/Mammalia/Homo_sapiens.gene_info.gz"
 
 
 # ----------------------------------------------------------------------------- data loading
@@ -117,6 +126,25 @@ def clean_symbol(s):
     return "" if s.lower() in ("nan", "---", "none") else s
 
 
+def load_ncbi_gene_info(cache):
+    """Return an Entrez GeneID -> official symbol mapping, downloading the NCBI file if needed."""
+    path = Path(cache) / "Homo_sapiens.gene_info.gz"
+    if not path.exists():
+        print("Downloading NCBI Homo_sapiens.gene_info.gz for Entrez-to-symbol mapping...")
+        try:
+            urllib.request.urlretrieve(GENE_INFO_URL, path)
+        except (urllib.error.URLError, OSError) as exc:
+            raise SystemExit(
+                "Could not download NCBI gene_info. Check your connection or manually place "
+                f"Homo_sapiens.gene_info.gz in {Path(cache).resolve()}: {exc}"
+            ) from exc
+    try:
+        info = pd.read_csv(path, sep="\t", compression="gzip", dtype=str, usecols=["GeneID", "Symbol"])
+    except (OSError, ValueError, gzip.BadGzipFile) as exc:
+        raise SystemExit(f"Could not read {path}: {exc}") from exc
+    return info.dropna().drop_duplicates("GeneID").set_index("GeneID")["Symbol"]
+
+
 def load_gse(gse_id, cache, inspect=False):
     import GEOparse
     gse = GEOparse.get_GEO(geo=gse_id, destdir=str(cache), silent=True)
@@ -131,10 +159,18 @@ def load_gse(gse_id, cache, inspect=False):
     ann = list(gse.gpls.values())[0].table
     cands = ["gene symbol", "gene_symbol", "symbol", "ilmn_gene", "gene_assignment", "gene"]
     col = next((c for c in ann.columns if c.lower() in cands), None)
-    if col is None:
-        raise SystemExit(f"{gse_id}: no gene-symbol column in platform table. Columns: {list(ann.columns)}")
     id_col = "ID" if "ID" in ann.columns else ann.columns[0]
-    mapping = ann.set_index(id_col)[col].map(clean_symbol)
+    if col is None:
+        entrez_col = next((c for c in ann.columns if c.lower().replace("_", " ") in
+                           ("entrez gene id", "entrez geneid", "gene id")), None)
+        if entrez_col is None:
+            raise SystemExit(f"{gse_id}: no gene-symbol or Entrez-ID column in platform table. "
+                             f"Columns: {list(ann.columns)}")
+        print(f"{gse_id}: platform has no gene symbols; mapping Entrez IDs through NCBI gene_info.")
+        entrez = ann.set_index(id_col)[entrez_col].astype(str).str.split(r"\\s*///\\s*|\\s*//\\s*").str[0]
+        mapping = entrez.map(load_ncbi_gene_info(cache)).map(clean_symbol)
+    else:
+        mapping = ann.set_index(id_col)[col].map(clean_symbol)
     mapping.index = mapping.index.astype(str)
     expr.index = expr.index.astype(str)
     mapping = mapping.reindex(expr.index)
@@ -273,7 +309,7 @@ def enrichment(genes, out):
 
 # ----------------------------------------------------------------------------- plots
 def make_plots(out, X, y, batch, Xtr, sv, model, Xte, yte, cm, k):
-    pcs = PCA(n_components=2, random_state=0).fit_transform(X)
+    pcs = PCA(n_components=2, random_state=0).fit_transform(X.fillna(0))
     fig, ax = plt.subplots(1, 2, figsize=(10, 4))
     for name, grp, a in (("class", y, ax[0]), ("batch", batch, ax[1])):
         for v in sorted(grp.unique(), key=str):
@@ -300,16 +336,21 @@ def make_plots(out, X, y, batch, Xtr, sv, model, Xte, yte, cm, k):
 
 
 # ----------------------------------------------------------------------------- main
-def run(X, y, batch, out, k, seed, do_enrichr):
+def run(X, y, batch, out, k, seed, do_enrichr, fast=False, cv_repeats=3):
     out.mkdir(parents=True, exist_ok=True)
     print(f"\nFinal matrix: {X.shape[0]} samples x {X.shape[1]} genes | class counts {y.value_counts().to_dict()}")
 
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, stratify=y, random_state=seed)
-    cv = min(3, int(ytr.value_counts().min()))
-    gs = GridSearchCV(new_model(seed), GRID, cv=cv, scoring="roc_auc", n_jobs=1).fit(Xtr, ytr)
-    params = gs.best_params_
-    print("Best params:", params)
-    model = gs.best_estimator_
+    if fast:
+        params = FAST_PARAMS.copy()
+        print("Fast-mode params:", params)
+        model = new_model(seed, **params).fit(Xtr, ytr)
+    else:
+        cv = min(3, int(ytr.value_counts().min()))
+        gs = GridSearchCV(new_model(seed), GRID, cv=cv, scoring="roc_auc", n_jobs=1).fit(Xtr, ytr)
+        params = gs.best_params_
+        print("Best params:", params)
+        model = gs.best_estimator_
 
     m_all, cm_all, _ = evaluate(model, Xte, yte)
     sv, imp = shap_importance(model, Xtr)               # SHAP from TRAIN data only
@@ -321,7 +362,7 @@ def run(X, y, batch, out, k, seed, do_enrichr):
     print("\nHold-out test metrics:\n", summary.to_string())
     print("Confusion matrix (all genes):\n", cm_all)
 
-    hc = honest_cv(X, y, params, k, seed)
+    hc = honest_cv(X, y, params, k, seed, repeats=cv_repeats)
     hc_sum = hc.agg(["mean", "std"]).round(3)
     print("\nLeakage-free repeated 5-fold CV (SHAP selection inside each fold):\n", hc_sum.to_string())
 
@@ -351,7 +392,11 @@ def main():
     ap.add_argument("--mitocarta", help="MitoCarta3.0 .xls or one-symbol-per-line text file")
     ap.add_argument("--cache", default="geo_cache"); ap.add_argument("--outdir")
     ap.add_argument("--seed", type=int, default=42); ap.add_argument("--no-enrichr", action="store_true")
+    ap.add_argument("--fast", action="store_true", help="skip grid search and use fixed, reproducible XGBoost settings")
+    ap.add_argument("--cv-repeats", type=int, default=3, help="repeats for stratified 5-fold CV (default: 3)")
     a = ap.parse_args()
+    if a.cv_repeats < 1:
+        ap.error("--cv-repeats must be at least 1")
 
     if a.demo:
         X, y, batch = demo_dataset(a.seed)
@@ -375,7 +420,8 @@ def main():
                                     a.label_col or cfg.get("label_col"), per)
         name = a.dataset or "_".join(gse)
 
-    run(X, y, batch, Path(a.outdir or f"results_{name}"), a.top_k, a.seed, not (a.no_enrichr or a.demo))
+    run(X, y, batch, Path(a.outdir or f"results_{name}"), a.top_k, a.seed,
+        not (a.no_enrichr or a.demo), fast=a.fast, cv_repeats=a.cv_repeats)
 
 
 if __name__ == "__main__":
