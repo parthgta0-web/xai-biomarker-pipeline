@@ -13,5 +13,5 @@ jobs:
         with:
           python-version: "3.11"
       - name: Compile pipeline
-        run: python -m py_compile src/xai_biomarker_pipeline.py
+        run: python -m py_compile xai_biomarker_pipeline.py
 
