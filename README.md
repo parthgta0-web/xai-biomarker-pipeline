@@ -131,7 +131,7 @@ Small cohorts, metadata-derived labels, differing study composition, and no exte
 
 ## Credits and references
 
-The original pipeline implementation was supplied by **Yuvraj**. The student patches and documents that supplied work; they do not claim to have written the original pipeline from scratch.
+The student patches and documents that supplied work; they do not claim to have written the original pipeline from scratch.
 
 - Dogra & Hasija (2025), DOI: [10.1016/j.imu.2025.102006](https://doi.org/10.1016/j.imu.2025.102006)
 - Sharma, Saini & Hasija (2024), DOI: [10.3389/fgene.2024.1356746](https://doi.org/10.3389/fgene.2024.1356746)
